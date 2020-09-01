@@ -13,8 +13,15 @@ constrained devices.
         * [MCU open-drain](#mcu-open-drain)
         * [MCU general-purpose pins](#mcu-general-purpose-pins)
         * [External driver](#external-driver)
-* [Protocol specification](#protocol-specification)
+* [Data frame layer](#data-frame-layer)
     * [SPL frames](#spl-frames)
+        * [Command id](#command-id)
+            * [Most significant bit](#most-significant-bit)
+            * [Predefined commands](#predefined-commands)
+            * [Custom commands](#custom-commands)
+        * [Device id](#device-id)
+            * [Broadcast address](#broadcast-address)
+        * [Payload](#payload)
 
 
 ### Overview
@@ -22,6 +29,7 @@ SPL (Originally named after **S**tock**P**i**L**er project) protocol is an open 
 for proprietary single-wire interfaces for applications where speed is not a huge priority.
 
 This protocol features the following:
+- Single leader device, multiple follower devices. (one to many communication)
 - Simple to implement
 - Low device requirements (Easily runs even on Padauk™ PMS150C)
 - Simple hardware layer (single pull-up resistor)
@@ -115,7 +123,73 @@ then the following two-pin configuration with external N-Channel MOSFET can be u
 
 Of course, in this case SPL output should be controlled with the inverted signal
 
-### Protocol specification
+### Data frame layer
 This chapter describes actual protocol implementation details
+
 #### SPL Frames
-TODO
+SPL protocol frame consists of 10 bytes  
+Its layout represents on the following image:  
+![SPL frame](img/spl_frame.png)
+
+##### Command id
+First byte of the packet represents the command id.
+
+###### Most significant bit
+
+MSB should be set to 1 if acknowledgement command is
+required to be sent by receiver. Should be set to 0 for the broadcast commands
+
+
+###### Predefined commands 
+* **0x00, 0x80** - ACK (Acknowledgment): Send by receiver after command was successfully received.
+Ignored by receiver. Payload is undefined
+* **0x01, 0x81** - PING: Command itself does nothing in 0x01 form, but when
+used in 0x81 form, ACK is sent after PING command was successfully received,
+therefore PING command allows to check that device is alive.
+* **0x02, 0x82** - SLEEP: should be used to put device in the low energy consumption mode. If command
+has acknowledgement flag set to 1 (0x82 form), then ACK should be sent by the device BEFORE it goes
+to sleep.
+
+
+###### Custom commands  
+Commands 0x03-0x7F (and their ACK complements 0x83-0xFF) are free to use by the user's application.
+
+
+##### Device id
+Device id is unique SPL bus device identifier. When sending command by the device, it should be set
+to device's own id; When receiving command, all commands with device id different from device's id
+should be skipped. Device ID is represented as **little-endian 32-bit number**
+
+_Example:_
+
+```
+# -> Sent by leader to follower device with id 0x00000001
+[CMD: 0x85][DEVICE_ID: 0x00000001][PAYLOAD: 0x11223344][CHK: 0x30]
+
+# <- Sent by follower device with id 0x00000001 to leader (ACK command)
+[CMD: 0x00][DEVICE_ID: 0x00000001][PAYLOAD: 0x00000000][CHK: 0x01]
+```
+
+###### Broadcast address
+**Address 0x00000000 is reserved** and can be used by master to send the command to all receivers
+simultaneously. (e.g. Enable sleep mode)
+
+Acknowledgement flag in command byte is ignored by the follower devices when broadcast command is
+sent
+
+##### Payload
+Payload content is completely user-defined. Reserved commands does not encode any data inside
+payload
+
+##### Checksum
+Checksum byte is calculated using normal sum operation, eg:
+
+```
+CMD = 0x85
+DEVICE_ID = 0x01, 0x00, 0x00, 0x00
+PAYLOAD = 0x11, 0x22, 0x33, 0x44
+
+CHK = byte(0x85 + 0x01 + 0x00 + 0x00 + 0x00 + 0x11 + 0x22 + 0x33 + 0x44)
+CHK = byte(0x130)
+CHK = 0x30
+```
