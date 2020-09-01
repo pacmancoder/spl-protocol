@@ -13,6 +13,11 @@ constrained devices.
         * [MCU open-drain](#mcu-open-drain)
         * [MCU general-purpose pins](#mcu-general-purpose-pins)
         * [External driver](#external-driver)
+* [Signal layer](#signal-layer)
+    * [Wake-up signal](#wake-up-signal)
+    * [Transmit command sequence](#transmit-command-sequence)
+    * [Receive command sequence](#receive-command-sequence)
+    * [Timings cheat sheet](#timings-cheat-sheet)
 * [Data frame layer](#data-frame-layer)
     * [SPL frames](#spl-frames)
         * [Command id](#command-id)
@@ -123,6 +128,100 @@ then the following two-pin configuration with external N-Channel MOSFET can be u
 
 Of course, in this case SPL output should be controlled with the inverted signal
 
+### Signal layer
+This chapter operates with HIGH and LOW levels, which are defined by hardware layer particular
+implementation (e.g: HIGH: >=5V, LOW: <=1V; HIGH: >=3.3V, LOW: <=0.5V etc.)
+
+#### Wake-up signal
+Devices on the bus can be potentially in low-power sleep mode; to assure that all devices on the
+bus are ready to receive data, the specific wake-up sequence should be sent.
+To perform wake-up signal, pull bus line low for 300us. Sleeping devices will be woken up, active
+devices will be unchanged (as 300us pulse exceeds 80us start bit pulse)
+
+```
+------|               |------
+      |               |
+      |_______________|
+      |<----300 us--->|
+```
+
+#### Transmit command sequence
+Transmit command sequence consists of 3 parts:
+* Frame start bit  
+    * Set bus LOW for 80 us  
+* 80 data bits transmission (10 bytes)  
+    * Each bit transmission: 80 us  
+    * Case 1: Transmit 0  
+        * Set bus HIGH for 20 us  
+        * Set bus LOW for 60 us  
+    * Case 2: Transmit 1  
+        * Set bus HIGH for 60 us  
+        * Set bus LOW for 20 us  
+* Frame end bit
+    * Set bus HIGH for 80 us
+
+Example:
+
+```
+--|    |-|   |---| |---| |-                    |---| |----
+  |    | |   |   | |   | | ...76 more bits...  |   | |
+  |____| |___|   |_|   |_|                     |   |_|
+  |STRT|  0  |  1  |  1  |                     |  1  |STOP
+  |    |      \   /      \                          /     |
+ /80us/\20+60us\ |60+20us |                        | 80us |
+```
+
+#### Receive command sequence
+Proposed receive algorithm is the following:
+* Detect start bit: Wait until bus line signal becomes LOW
+    * If bus stayed in LOW state over 200us, wait until bus becomes HIGH again and start
+      receive sequence again
+    * If bus stayed in LOW state less than 200us, then start bit was detected, continue receive
+      sequence
+* (Repeat 80 times) Receive n bit: Wait until bus becomes LOW, save time spent in HIGH state, then
+  wait until bus signal becomes HIGH again, save time spent if HIGH state.
+    * If time spent in HIGH state is greater than time spent in LOW state during bit receive step,
+      then received bit is "1", in other case received bit is "0".
+    * If during bit receive sequence bus stayed in one state for too long (>200 us) then receive
+      sequence should be interrupted. Wait for 50 ms before next receive sequence. So much time is
+      required to wait for bus signal to stabilize (e.g. wait when leader will finish its
+      transmission) 
+* Calculate command checksum of received command, if it is not matched, wait for error interval
+  (50 ms) and start receive sequence again
+* Check that Device id in command is matched or command is broadcast. In other case ignore the
+  received command altogether; Interrupt command processing, start receive sequence again.
+* Process pre-defined commands + Process user-defined command
+* If command does not require acknowledgement, finish receive sequence, new receive sequence.
+* Wait for sender switch interval (100ms) This will ensure that leader finished to transmit frame
+  end signal and ready for receive ACK command.
+* Send ACK command to the leader
+
+**Sender switch:**
+```
+
+---| |------|    |---| |
+   | |      |    |   | |
+   |_|      |____|   |_|
+---->|100us |<---------
+recv.|switch| send
+```
+
+#### Timings cheat sheet
+|Process                   |Timing                     |
+|--------------------------|---------------------------|
+|Start bit                 |80 us                      |
+|Stop  bit                 |80 us                      |
+|Bit transmission time     |80 us                      |
+|"1" HIGH signal           |60 us                      |
+|"1" LOW signal            |20 us                      |
+|"0" HIGH signal           |20 us                      |
+|"0" LOW signal            |60 us                      |
+|Error receive interval    |50 ms                      |
+|Send command without ACK  |6560 us (6.56 ms)          |
+|Send command with ACK     |13060 us (13.06 ms)        |
+|Bitrate without ACK       |12.195 Kb/s (1.524 KB/s)   |
+|Bitrate with ACK          |6.126 Kb/s (0.766 KB/s)    |
+
 ### Data frame layer
 This chapter describes actual protocol implementation details
 
@@ -171,7 +270,7 @@ _Example:_
 ```
 
 ###### Broadcast address
-**Address 0x00000000 is reserved** and can be used by master to send the command to all receivers
+**Address 0x00000000 is reserved** and can be used by leader to send the command to all receivers
 simultaneously. (e.g. Enable sleep mode)
 
 Acknowledgement flag in command byte is ignored by the follower devices when broadcast command is
